@@ -10,6 +10,8 @@ from cmdstanpy import TMPDIR
 from cmdstanpy.utils import jsondump, rdump
 from cmdstanpy.utils import check_csv, read_metric
 
+from enum import Enum
+
 
 class Model(object):
     """Stan model."""
@@ -81,49 +83,23 @@ class StanData(object):
         return self._data_file
 
 
-class SamplerArgs(object):
-    """Container for arguments for the NUTS adaptive sampler."""
+class CommonArgs(object):
+    """Container for common arguments for sampler / optimizer"""
 
-    def __init__(
-        self,
-        model: Model,
-        chain_ids: List[int],
-        data: str = None,
-        seed: Union[int, List[int]] = None,
-        inits: Union[float, str, List[str]] = None,
-        warmup_iters: int = None,
-        sampling_iters: int = None,
-        warmup_schedule: Tuple[float, float, float] = None,
-        save_warmup: bool = False,
-        thin: int = None,
-        max_treedepth: int = None,
-        metric: Union[str, List[str]] = None,
-        step_size: Union[float, List[float]] = None,
-        adapt_engaged: bool = None,
-        adapt_delta: float = None,
-        output_file: str = None,
-    ) -> None:
-        """Initialize object."""
+    def __init__(self,
+                 model: Model,
+                 data: str = None,
+                 output_file: str = None,
+                 seed: Union[int, List[int]] = None,
+                 chain_ids: List[int] = None,
+                 inits: Union[float, str, List[str]] = None,
+                 ):
         self.model = model
-        self.chain_ids = chain_ids
         self.data = data
-        self.seed = seed
-        self.inits = inits
-        self.warmup_iters = warmup_iters
-        self.sampling_iters = sampling_iters
-        self.warmup_schedule = warmup_schedule
-        self.save_warmup = save_warmup
-        self.thin = thin
-        self.max_treedepth = max_treedepth
-        self.metric = metric
-        self.step_size = step_size
-        self.adapt_engaged = adapt_engaged
-        self.adapt_delta = adapt_delta
         self.output_file = output_file
-        self.metric_file = None
-        self.init_buffer = None
-        self.term_buffer = None
-        self.validate()
+        self.seed = seed
+        self.chain_ids = chain_ids
+        self.inits = inits
 
     def validate(self) -> None:
         """
@@ -131,11 +107,8 @@ class SamplerArgs(object):
 
         * input files must exist
         * output files must be in a writeable directory
-        * adaptation and warmup args are consistent
-        * if file(s) for metric are supplied, check contents.
-        * if no seed specified, set random seed.
-        * length of per-chain lists equals specified # of chains
         """
+
         if self.model is None:
             raise ValueError('no stan model specified')
         if self.model.exe_file is None:
@@ -151,13 +124,6 @@ class SamplerArgs(object):
                     self.model.exe_file
                 )
             )
-
-        if self.chain_ids is not None:
-            for i in range(len(self.chain_ids)):
-                if self.chain_ids[i] < 1:
-                    raise ValueError(
-                        'invalid chain_id {}'.format(self.chain_ids[i])
-                        )
 
         if self.output_file is not None:
             if not os.path.exists(os.path.dirname(self.output_file)):
@@ -183,14 +149,16 @@ class SamplerArgs(object):
                 raise ValueError(
                     'seed must be an integer between 0 and 2**32-1,'
                     ' found {}'.format(self.seed)
-                    )
+                )
             elif isinstance(self.seed, int):
                 if self.seed < 0 or self.seed > 2 ** 32 - 1:
                     raise ValueError(
                         'seed must be an integer between 0 and 2**32-1,'
                         ' found {}'.format(self.seed)
-                        )
+                    )
             else:
+                if self.chain_ids is None:
+                    raise ValueError("seed must not be a list")
                 if len(self.seed) != len(self.chain_ids):
                     raise ValueError(
                         'number of seeds must match number of chains '
@@ -215,11 +183,15 @@ class SamplerArgs(object):
                 if self.inits < 0:
                     raise ValueError(
                         'inits must be > 0, found {}'.format(self.inits)
-                        )
+                    )
             elif isinstance(self.inits, str):
                 if not os.path.exists(self.inits):
                     raise ValueError('no such file {}'.format(self.inits))
             elif isinstance(self.inits, List):
+
+                if self.chain_ids is None:
+                    raise ValueError("inits must not be a list")
+
                 if len(self.inits) != len(self.chain_ids):
                     raise ValueError(
                         'number of inits files must match number of chains '
@@ -232,12 +204,141 @@ class SamplerArgs(object):
                     raise ValueError(
                         'each chain must have its own init file,'
                         ' found duplicates in inits files list.'
-                        )
+                    )
                 for i in range(len(self.inits)):
                     if not os.path.exists(self.inits[i]):
                         raise ValueError(
                             'no such file {}'.format(self.inits[i])
                         )
+
+
+class OptimizeArgs(CommonArgs):
+    """Container for arguments for the optimizer."""
+
+    OPTIMIZE_ALGOS = {"BFGS", "LBFGS", "Newton"}
+
+    def __init__(
+            self,
+            model: Model,
+            data: str = None,
+            seed: Union[int, List[int]] = None,
+            output_file: str = None,
+            algorithm: str = "LBFGS",
+            inits: Union[float, str, List[str]] = None,
+            init_alpha: float = 0.001,
+            iter: int = 2000
+    ) -> None:
+
+        super(OptimizeArgs, self).__init__(model=model, data=data, output_file=output_file, seed=seed,
+                                           chain_ids=None, inits=inits)
+        self.algorithm = algorithm
+        self.init_alpha = float(init_alpha)
+        self.iter = int(iter)
+        self.validate()
+
+    def validate(self) -> None:
+        """
+        Check arguments correctness and consistency.
+        """
+
+        super(OptimizeArgs, self).validate()
+        if self.algorithm not in self.OPTIMIZE_ALGOS:
+            raise ValueError(
+                "Please specify optimizer algorithms as one of [{}]".format(", ".join(self.OPTIMIZE_ALGOS)))
+
+        if self.init_alpha < 0.0:
+            raise ValueError("init_alpha must be greater than 0")
+
+        if self.iter < 0:
+            raise ValueError("iter must be greather than 0")
+
+    def compose_command(self, csv_file: str) -> str:
+        """compose command string for CmdStan for non-default arg values.
+        """
+        cmd = '{}'.format(self.model.exe_file)
+
+        if self.seed is not None:
+            if not isinstance(self.seed, list):
+                cmd = '{} random seed={}'.format(cmd, self.seed)
+
+        if self.data is not None:
+            cmd = '{} data file={}'.format(cmd, self.data)
+
+        if self.inits is not None:
+            if not isinstance(self.inits, list):
+                cmd = '{} init={}'.format(cmd, self.inits)
+
+        cmd = '{} output file={}'.format(cmd, csv_file)
+        cmd = cmd + ' method=optimize algorithm={}'.format(self.algorithm.lower())
+        if self.init_alpha is not None:
+            cmd = cmd + ' init_alpha={}'.format(self.init_alpha)
+        if self.iter is not None:
+            cmd = cmd + ' iter={}'.format(self.iter)
+        return cmd
+
+
+class SamplerArgs(CommonArgs):
+    """Container for arguments for the NUTS adaptive sampler."""
+
+    def __init__(
+            self,
+            model: Model,
+            chain_ids: List[int],
+            data: str = None,
+            seed: Union[int, List[int]] = None,
+            inits: Union[float, str, List[str]] = None,
+            warmup_iters: int = None,
+            sampling_iters: int = None,
+            warmup_schedule: Tuple[float, float, float] = None,
+            save_warmup: bool = False,
+            thin: int = None,
+            max_treedepth: int = None,
+            metric: Union[str, List[str]] = None,
+            step_size: Union[float, List[float]] = None,
+            adapt_engaged: bool = None,
+            adapt_delta: float = None,
+            output_file: str = None,
+    ) -> None:
+        """Initialize object."""
+        super(SamplerArgs, self).__init__(model=model, data=data, output_file=output_file, seed=seed,
+                                          chain_ids=chain_ids)
+
+        self.inits = inits
+        self.warmup_iters = warmup_iters
+        self.sampling_iters = sampling_iters
+        self.warmup_schedule = warmup_schedule
+        self.save_warmup = save_warmup
+        self.thin = thin
+        self.max_treedepth = max_treedepth
+        self.metric = metric
+        self.step_size = step_size
+        self.adapt_engaged = adapt_engaged
+        self.adapt_delta = adapt_delta
+        self.metric_file = None
+        self.init_buffer = None
+        self.term_buffer = None
+        self.validate()
+
+    def validate(self) -> None:
+        """
+        Check arguments correctness and consistency.
+
+        * input files must exist
+        * output files must be in a writeable directory
+        * adaptation and warmup args are consistent
+        * if file(s) for metric are supplied, check contents.
+        * if no seed specified, set random seed.
+        * length of per-chain lists equals specified # of chains
+        """
+
+        super(SamplerArgs, self).validate()
+
+        if self.chain_ids is not None:
+            for i in range(len(self.chain_ids)):
+                if self.chain_ids[i] < 1:
+                    raise ValueError(
+                        'invalid chain_id {}'.format(self.chain_ids[i])
+                    )
 
         if self.warmup_iters is not None:
             if self.warmup_iters < 0:
@@ -307,7 +408,7 @@ class SamplerArgs(object):
                 if self.step_size < 0:
                     raise ValueError(
                         'step_size must be > 0, found {}'.format(self.step_size)
-                        )
+                    )
             else:
                 if len(self.step_size) != len(self.chain_ids):
                     raise ValueError(
@@ -348,7 +449,7 @@ class SamplerArgs(object):
                     raise ValueError(
                         'each chain must have its own metric file,'
                         ' found duplicates in metric files list.'
-                        )
+                    )
                 for i in range(len(self.metric)):
                     if not os.path.exists(self.metric[i]):
                         raise ValueError(
@@ -432,9 +533,9 @@ class SamplerArgs(object):
             else:
                 cmd = '{} metric_file="{}"'.format(cmd, self.metric_file[idx])
         if (
-            self.adapt_engaged
-            or self.adapt_delta is not None
-            or self.warmup_schedule is not None
+                self.adapt_engaged
+                or self.adapt_delta is not None
+                or self.warmup_schedule is not None
         ):
             cmd = cmd + ' adapt'
         if self.adapt_engaged:
@@ -632,9 +733,9 @@ class RunSet(object):
         by parsing the validated stan_csv files.
         """
         if not (
-            self._stepsize is None
-            and self._metric is None
-            and self._sample is None
+                self._stepsize is None
+                and self._metric is None
+                and self._sample is None
         ):
             return
         self._stepsize = np.empty(self._chains, dtype=float)
