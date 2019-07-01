@@ -15,15 +15,15 @@ from pathlib import Path
 from typing import Dict, List, Union, Tuple
 
 from cmdstanpy import TMPDIR
-from cmdstanpy.lib import Model, StanData, RunSet, SamplerArgs
+from cmdstanpy.lib import Model, StanData, RunSet, SamplerArgs, OptimizeArgs
 from cmdstanpy.utils import cmdstan_path
 
 
 def compile_model(
-    stan_file: str = None,
-    opt_lvl: int = 2,
-    overwrite: bool = False,
-    include_paths: List[str] = None,
+        stan_file: str = None,
+        opt_lvl: int = 2,
+        overwrite: bool = False,
+        include_paths: List[str] = None,
 ) -> Model:
     """
     Compile the given Stan model file to an executable.
@@ -79,26 +79,71 @@ def compile_model(
     return Model(stan_file, exe_file)
 
 
+def optimize(
+        stan_model: Model,
+        data: str = None,
+        seed: Union[int, List[int]] = None,
+        csv_output_file: str = None,
+        algorithm: str = "LBFGS",
+        inits: Union[float, str, List[str]] = None,
+        init_alpha: float = 0.001,
+        iter: int = 2000
+) -> RunSet:
+    inits = prepare_data(inits)
+
+    data = prepare_data(data)
+
+    args = OptimizeArgs(
+        model=stan_model,
+        data=data,
+        seed=seed,
+        inits=inits,
+        output_file=csv_output_file,
+        algorithm=algorithm,
+        init_alpha=init_alpha,
+        iter=iter
+    )
+
+    runset = RunSet(args=args, chains=1)
+    try:
+        tp = ThreadPool(cores)
+        for i in range(chains):
+            tp.apply_async(do_sample, (runset, i))
+    finally:
+        tp.close()
+        tp.join()
+    if not runset.check_retcodes():
+        msg = 'Error during sampling'
+        for i in range(chains):
+            if runset.retcode(i) != 0:
+                msg = '{}, chain {} returned error code {}'.format(
+                    msg, i, runset.retcode(i)
+                )
+        raise Exception(msg)
+    runset.validate_csv_files()
+    return runset
+
+
 def sample(
-    stan_model: Model,
-    data: Union[Dict, str] = None,
-    chains: int = 4,
-    cores: int = 1,
-    seed: Union[int, List[int]] = None,
-    chain_ids: Union[int, List[int]] = None,
-    inits: Union[Dict, float, str, List[str]] = None,
-    warmup_iters: int = None,
-    sampling_iters: int = None,
-    warmup_schedule: Tuple[float, float, float] = (0.15, 0.75, 0.10),
-    save_warmup: bool = False,
-    thin: int = None,
-    max_treedepth: float = None,
-    metric: Union[str, List[str]] = None,
-    step_size: Union[float, List[float]] = None,
-    adapt_engaged: bool = True,
-    adapt_delta: float = None,
-    csv_output_file: str = None,
-    show_progress: bool = False,
+        stan_model: Model,
+        data: Union[Dict, str] = None,
+        chains: int = 4,
+        cores: int = 1,
+        seed: Union[int, List[int]] = None,
+        chain_ids: Union[int, List[int]] = None,
+        inits: Union[Dict, float, str, List[str]] = None,
+        warmup_iters: int = None,
+        sampling_iters: int = None,
+        warmup_schedule: Tuple[float, float, float] = (0.15, 0.75, 0.10),
+        save_warmup: bool = False,
+        thin: int = None,
+        max_treedepth: float = None,
+        metric: Union[str, List[str]] = None,
+        step_size: Union[float, List[float]] = None,
+        adapt_engaged: bool = True,
+        adapt_delta: float = None,
+        csv_output_file: str = None,
+        show_progress: bool = False,
 ) -> RunSet:
     """
     Run or more chains of the NUTS sampler to produce a set of draws
@@ -257,30 +302,10 @@ def sample(
         )
         cores = cpu_count()
 
-    if data is not None:
-        if isinstance(data, dict):
-            with tempfile.NamedTemporaryFile(
-                mode='w+', suffix='.json', dir=TMPDIR, delete=False
-            ) as fd:
-                data_file = fd.name
-                print('input data tempfile: {}'.format(fd.name))
-            sd = StanData(data_file)
-            sd.write_json(data)
-            data_dict = data
-            data = data_file
+    # TODO:  issue 49: inits can be initialization function
+    inits = prepare_data(inits)
 
-    if inits is not None:
-        if isinstance(inits, dict):
-            with tempfile.NamedTemporaryFile(
-                mode='w+', suffix='.json', dir=TMPDIR, delete=False
-            ) as fd:
-                inits_file = fd.name
-                print('inits tempfile: {}'.format(fd.name))
-            sd = StanData(inits_file)
-            sd.write_json(inits)
-            inits_dict = inits
-            inits = inits_file
-        # TODO:  issue 49: inits can be initialization function
+    data = prepare_data(data)
 
     args = SamplerArgs(
         model=stan_model,
@@ -319,6 +344,20 @@ def sample(
         raise Exception(msg)
     runset.validate_csv_files()
     return runset
+
+
+def prepare_data(data: Union[Dict, float, str, List[str]]) -> str:
+    if data is not None:
+        if isinstance(data, dict):
+            with tempfile.NamedTemporaryFile(
+                    mode='w+', suffix='.json', dir=TMPDIR, delete=False
+            ) as fd:
+                temp_file = fd.name
+
+            sd = StanData(temp_file)
+            sd.write_json(data)
+            return temp_file
+    return data
 
 
 def summary(runset: RunSet) -> pd.DataFrame:
@@ -403,7 +442,7 @@ def get_drawset(runset: RunSet, params: List[str] = None) -> pd.DataFrame:
 
 
 def save_csvfiles(
-    runset: RunSet, dir: str = None, basename: str = None
+        runset: RunSet, dir: str = None, basename: str = None
 ) -> None:
     """
     Moves csvfiles to specified directory using specified basename,
